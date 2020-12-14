@@ -1,0 +1,25 @@
+metadata_variable	type	baseline	useForPERMANOVA	useForLCA	useForNB
+CaseControl	factor	Control	yes		no
+Regimen	factor	untreated	yes		no
+Group	factor	Control.untreated	no		yes
+patid	character		no		no
+delgage	numeric		no		no
+deldtup	date		no		no
+Country	factor		yes		no
+Plasma.drawdt	date				
+DBS.drawdt	date				
+GestationalAgeAtCollection	numeric		yes		no
+SampleID	character				
+hemaval	numeric				
+gender	factor	Female			
+weight0week	numeric				
+weight1week	numeric				
+ap_onstgage	numeric				
+nbclass	factor				
+instn	factor				
+DaysFromEntryToDelivery	numeric				
+imputed.gage	numeric				
+DaysPTDPlasma	numeric				
+DaysPTDDBS	numeric				
+DaysPTDPlasma2	factor	(14,200]			
+DaysPTDDBS2	factor	(14,200]			
