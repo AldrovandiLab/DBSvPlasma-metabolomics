@@ -28,6 +28,7 @@ library(abind)
 library(limma)
 library(psych)
 library(glmnet)
+library(factoextra)
 
 source("utils.R")
 source("mcc.R")
@@ -39,6 +40,7 @@ dircolors <- c("blue", "red", "grey"); names(dircolors) <- c("down", "up", "NS")
 
 mapping_fn <- "data/DBSvPlasma-metabolomics_Mapping.121420.txt"
 mapping <- read.table(mapping_fn, header=T, as.is=T, sep="\t")
+
 metadata_variables <- read.table("data/metadata_variables.121420.txt", header=T, as.is=T, sep="\t", row.names=1)
 for (mvar in rownames(metadata_variables)) {
 	if (metadata_variables[mvar, "type"] == "factor") {
@@ -57,6 +59,8 @@ for (mvar in rownames(metadata_variables)) {
 		mapping[,mvar] <- as.numeric(as.character(mapping[,mvar]))
 	}
 }
+
+detection_thresholds <- c(1, 2, 3, 4, 5, seq(from=10,to=75,by=5), 79)
 
 #########################################################################################################
 ### read in Metabolon data
@@ -122,12 +126,27 @@ for (st in c("DBS", "Plasma")) {
 		rownames(tmp) <- labels
 		df.metabolon.raw[[st]][[length(df.metabolon.raw[[st]])+1]] <- tmp
 	}
-	names(df.metabolon.raw[[st]]) <- c("BIOCHEMICAL")
+	names(df.metabolon.raw[[st]]) <- "BIOCHEMICAL"
 }
 names(df.metabolon.raw) <- c("DBS", "Plasma")
+#######################
+## replace Metabolon ScaledImpData with impute/log-transform/Z-transform on just the maternal data
+for (st in c("DBS", "Plasma")) {
+	for (mlevel in c("BIOCHEMICAL")) {
+		tmp <- df.metabolon.raw[[st]][[mlevel]]
+		tmp2 <- apply(tmp, 1, function(x) {
+			x[which(is.na(x))] <- min(x, na.rm=T) # impute to min value
+			x <- log(x) # log-transform
+			x <- (x-mean(x))/sd(x) # Z-transform
+			x
+		})
+		df.metabolon[[st]][[mlevel]] <- tmp2
+	}
+}
 
 out_pdf <- sprintf("output/metabolon_analysis_DBS_vs_plasma.%s.pdf", format(Sys.Date(), "%m%d%y"))
 pdf(out_pdf, width=12)
+
 
 #########################################################################################################
 ### Analysis
@@ -137,27 +156,43 @@ print(p)
 ### QC data about metabolomics
 ## number of metabolites detected in each sample type, Venn diagrams
 mlevel <- "BIOCHEMICAL"
-qc <- {}; merged <- data.frame(BIOCHEMICAL=rownames(metabolon_map), detected.maternal_DBS=NA, detected.maternal_plasma=NA, median.maternal_DBS=NA, median.maternal_plasma=NA); rownames(merged) <- merged$BIOCHEMICAL
+qc <- {}; merged <- data.frame(BIOCHEMICAL=rownames(metabolon_map), detected.DBS=NA, detected.plasma=NA, median.DBS=NA, median.plasma=NA); rownames(merged) <- merged$BIOCHEMICAL
 for (st in c("DBS", "Plasma")) {
 	tmp <- df.metabolon.raw[[st]][[mlevel]]
 	# count detectable as any non-NA value
 	counts.maternal <- apply(tmp[, as.character(mapping$patid)], 1, function(x) length(which(!is.na(x))))
+	# summary statistics
 	median.maternal <- apply(tmp[, as.character(mapping$patid)], 1, function(x) median(x,na.rm=T))
-	out <- data.frame(BIOCHEMICAL=rownames(tmp), subtype=st, detected.maternal=counts.maternal, median.maternal=median.maternal)
+	mean.maternal <- apply(tmp[, as.character(mapping$patid)], 1, function(x) mean(x,na.rm=T))
+	sd.maternal <- apply(tmp[, as.character(mapping$patid)], 1, function(x) sd(x,na.rm=T))
+	medianlog.maternal <- apply(tmp[, as.character(mapping$patid)], 1, function(x) median(log(x),na.rm=T))
+	meanlog.maternal <- apply(tmp[, as.character(mapping$patid)], 1, function(x) mean(log(x),na.rm=T))
+	sdlog.maternal <- apply(tmp[, as.character(mapping$patid)], 1, function(x) sd(log(x),na.rm=T))
+
+	out <- data.frame(BIOCHEMICAL=rownames(tmp), subtype=st, detected.maternal=counts.maternal, median.maternal=median.maternal, mean.maternal=mean.maternal, sd.maternal=sd.maternal, medianlog.maternal=medianlog.maternal, meanlog.maternal=meanlog.maternal, sdlog.maternal=sdlog.maternal)
 	if (st == "DBS") {
-		merged[as.character(out$BIOCHEMICAL), c("BIOCHEMICAL", "detected.maternal_DBS", "median.maternal_DBS")] <- out[, c("BIOCHEMICAL", "detected.maternal", "median.maternal")]
+		merged[as.character(out$BIOCHEMICAL), c("BIOCHEMICAL", "detected.DBS", "median.DBS", "mean.DBS", "sd.DBS", "medianlog.DBS", "meanlog.DBS", "sdlog.DBS")] <- out[, c("BIOCHEMICAL", "detected.maternal", "median.maternal", "mean.maternal", "sd.maternal", "medianlog.maternal", "meanlog.maternal", "sdlog.maternal")]
 	} else {
-		merged[as.character(out$BIOCHEMICAL), c("BIOCHEMICAL", "detected.maternal_plasma", "median.maternal_plasma")] <- out[, c("BIOCHEMICAL", "detected.maternal", "median.maternal")]
+		merged[as.character(out$BIOCHEMICAL), c("BIOCHEMICAL", "detected.plasma", "median.plasma", "mean.plasma", "sd.plasma", "medianlog.plasma", "meanlog.plasma", "sdlog.plasma")] <- out[, c("BIOCHEMICAL", "detected.maternal", "median.maternal", "mean.maternal", "sd.maternal", "medianlog.maternal", "meanlog.maternal", "sdlog.maternal")]
 	}
 	write.table(out, file=sprintf("output/detected_counts.%s.txt", st), quote=F, sep="\t", row.names=F, col.names=T)
 }
-merged$FLAG.maternal_DBS <- ifelse(is.na(merged$detected.maternal_DBS), FALSE, merged$detected.maternal_DBS > 0)
-merged$FLAG.maternal_plasma <- ifelse(is.na(merged$detected.maternal_plasma), FALSE, merged$detected.maternal_plasma > 0)
-merged$Group <- ifelse(merged$FLAG.maternal_plasma & merged$FLAG.maternal_DBS, "both", ifelse(merged$FLAG.maternal_DBS, "DBS", ifelse(merged$FLAG.maternal_plasma, "Plasma", "other")))
-merged <- subset(merged, Group != "other") # remove BIOCHEMICALS with all NA values
+merged$FLAG.DBS <- ifelse(is.na(merged$detected.DBS), FALSE, merged$detected.DBS > 0)
+merged$FLAG.plasma <- ifelse(is.na(merged$detected.plasma), FALSE, merged$detected.plasma > 0)
+merged$Group <- ifelse(merged$FLAG.plasma & merged$FLAG.DBS, "both", ifelse(merged$FLAG.DBS, "DBS", ifelse(merged$FLAG.plasma, "Plasma", "other")))
+merged <- subset(merged, Group != "other") # remove 3 BIOCHEMICALs only found in infant DBS (shows up in metabolon_map)
 merged$SUB.PATHWAY <- metabolon_map[rownames(merged), "SUB.PATHWAY"]
 merged$SUPER.PATHWAY <- metabolon_map[rownames(merged), "SUPER.PATHWAY"]
-vc <- vennCounts(merged[, c("FLAG.maternal_DBS", "FLAG.maternal_plasma")])
+# count number of intersecting subjects for each metabolite
+merged$detected.same.subject <- NA
+for (met in rownames(merged)) {
+	vec.DBS <- df.metabolon.raw[["DBS"]][["BIOCHEMICAL"]][met,]
+	names.DBS <- names(vec.DBS)[which(!is.na(vec.DBS))]
+	vec.plasma <- df.metabolon.raw[["Plasma"]][["BIOCHEMICAL"]][met,]
+	names.plasma <- names(vec.plasma)[which(!is.na(vec.plasma))]
+	merged[met, "detected.same.subject"] <- length(intersect(names.DBS, names.plasma))
+}
+vc <- vennCounts(merged[, c("FLAG.DBS", "FLAG.plasma")])
 vennDiagram(vc, cex=c(1,1))
 write.table(merged, file=sprintf("output/detected_counts.%s.txt", "merged"), quote=F, sep="\t", row.names=F, col.names=T)
 # pie charts of BIOCHEMICAL classes in each group
@@ -192,6 +227,24 @@ df2$dir <- ifelse(is.na(df2$padj), "NS", ifelse(df2$padj < 0.05, "SIG", "NS"))
 p <- ggplot(df2, aes(x=Group, y=SUPER.PATHWAY, fill=rel)) + geom_point(aes(size=count, color=dir), shape=21) + geom_text(aes(label=count), size=2, hjust=0.5, vjust=0.5) + theme_classic() + ggtitle(sprintf("Enrichment of lipid classes")) + scale_fill_gradient2(low="blue", mid="white", high="red") + scale_color_manual(values=c("black", "purple"))
 print(p)
 
+## distribution of detection counts as a function of detection threshold
+df.detection <- {}
+for (thresh in detection_thresholds) {
+	detected.DBS <- rownames(merged)[which(ifelse(is.na(merged$detected.DBS), FALSE, merged$detected.DBS >= thresh))]
+	detected.plasma <- rownames(merged)[which(ifelse(is.na(merged$detected.plasma), FALSE, merged$detected.plasma >= thresh))]
+	tmp <- c(thresh, length(setdiff(detected.DBS, detected.plasma)), length(intersect(detected.DBS, detected.plasma)), length(setdiff(detected.plasma, detected.DBS)))
+	df.detection <- rbind(df.detection, tmp)
+}
+df.detection <- as.data.frame(df.detection)
+colnames(df.detection) <- c("threshold", "DBS_only", "both", "plasma_only")
+df.detection$threshold <- factor(df.detection$threshold)
+df <- melt(df.detection); colnames(df) <- c("threshold", "group", "value")
+df$pct <- melt(ddply(df, .(threshold), function(x) 100*(x$value / sum(x$value))))$value
+df$valuestr <- sprintf("%d\n(%.1f%%)", df$value, round(df$pct, 1))
+p <- ggplot(df, aes(x=threshold, y=value, fill=group)) + geom_bar(stat="identity") + geom_text(aes(label=valuestr), size=2, position = position_stack(vjust = 0.5)) + theme_classic() + ggtitle(sprintf("Metabolite detection by threshold"))
+print(p)
+
+
 ## summary statistics and dynamic range for metabolites by DBS/plasma
 mapping.sel <- mapping; rownames(mapping.sel) <- mapping$patid
 res <- {}
@@ -221,35 +274,40 @@ for (metric in c("mean", "median", "min", "max", "IQR")) {
 ## ICC and Spearman correlation in paired maternal plasma/DBS samples
 subtype <- "maternal"
 mapping.sel <- mapping; rownames(mapping.sel) <- mapping$patid
-sel.metabolites <- rownames(subset(merged, FLAG.maternal_plasma & FLAG.maternal_DBS))
+sel.metabolites <- rownames(subset(merged, FLAG.plasma & FLAG.DBS)) # only do analysis on BIOCHEMICALs that have > 1 observation, as it is needed for the Z-transform
 data <- matrix()
 data.plasma <- df.metabolon[["Plasma"]][[mlevel]][as.character(mapping$patid), sel.metabolites]
 data.dbs <- df.metabolon[["DBS"]][[mlevel]][as.character(mapping$patid), sel.metabolites]
+# remove entries with no variation
+to_remove <- c(names(which(apply(data.plasma, 2, function(x) all(is.na(x))))), names(which(apply(data.dbs, 2, function(x) all(is.na(x))))))
+data.plasma <- data.plasma[, setdiff(colnames(data.plasma), to_remove)]
+data.dbs <- data.dbs[, setdiff(colnames(data.dbs), to_remove)]
+sel.metabolites <- setdiff(sel.metabolites, to_remove); sel.metabolites.fixed <- sel.metabolites
 data <- abind(data.plasma, data.dbs, along=0); dimnames(data)[[1]] <- c("Plasma", "DBS")
 ## ICC by metabolite
 final <- apply(data, 3, function(x) {
 	test <- cor.test(x[1,], x[2,], method="spearman")
-	unlist(c(mean(x[1,]), mean(x[2,]), sd(x[1,]), sd(x[2,]), mean(abs(x[1,]-x[2,])), ICC(t(x))$results["Single_raters_absolute", c("ICC", "p", "lower bound", "upper bound")], test$estimate, test$p.value))
+	unlist(c(ICC(t(x))$results["Single_random_raters", c("ICC", "p", "lower bound", "upper bound")], test$estimate, test$p.value))
 #	icc(t(x))$value
-}); final <- as.data.frame(t(final)); colnames(final) <- c("mean.plasma", "mean.DBS", "sd.plasma", "sd.DBS", "mean_difference", "ICC", "p", "lower_bound", "upper_bound", "rho", "spearman_p")
-final$padj <- p.adjust(final$p, method="fdr")
+}); final <- as.data.frame(t(final)); colnames(final) <- c("ICC", "p", "lower_bound", "upper_bound", "rho", "spearman_p")
+final$padj <- p.adjust(final$p, method="fdr") # "mean.plasma", "mean.DBS", "sd.plasma", "sd.DBS", "mean_difference"
 final$spearman_padj <- p.adjust(final$spearman_p, method="fdr")
+final <- merge(final, merged, by="row.names"); rownames(final) <- final$Row.names
 final <- final[order(final$p), ]
 write.table(final, file="output/ICC.metabolite.txt", quote=F, sep="\t", row.names=T, col.names=T)
-final <- subset(final, mean.plasma > -5 & mean.DBS > -5) # remove a few really low abundance outliers
-test <- cor.test(~ mean.plasma + ICC, final, method="spearman")
-p <- ggplot(final, aes(x=mean.plasma, y=ICC)) + geom_point() + stat_smooth(method="lm") + theme_classic() + ggtitle(sprintf("ICC vs mean.plasma (by metabolite, Spearman rho=%.4g, p=%.4g)", test$estimate, test$p.value))
+test <- cor.test(~ meanlog.plasma + ICC, final, method="spearman")
+p <- ggplot(final, aes(x=meanlog.plasma, y=ICC)) + geom_point() + stat_smooth(method="lm") + theme_classic() + ggtitle(sprintf("ICC vs meanlog.plasma (by metabolite, Spearman rho=%.4g, p=%.4g)", test$estimate, test$p.value))
 print(p)
-test <- cor.test(~ mean.DBS + ICC, final, method="spearman")
-p <- ggplot(final, aes(x=mean.DBS, y=ICC)) + geom_point() + stat_smooth(method="lm") + theme_classic() + ggtitle(sprintf("ICC vs mean.DBS (by metabolite, Spearman rho=%.4g, p=%.4g)", test$estimate, test$p.value))
+test <- cor.test(~ meanlog.DBS + ICC, final, method="spearman")
+p <- ggplot(final, aes(x=meanlog.DBS, y=ICC)) + geom_point() + stat_smooth(method="lm") + theme_classic() + ggtitle(sprintf("ICC vs meanlog.DBS (by metabolite, Spearman rho=%.4g, p=%.4g)", test$estimate, test$p.value))
 print(p)
 p <- ggplot(final, aes(x=ICC)) + geom_histogram(bins=50) + theme_classic() + ggtitle(sprintf("Distribution of ICC (by metabolite, mean=%.2g, median=%.2g)", mean(final$ICC), median(final$ICC))) + geom_vline(xintercept=mean(final$ICC), color="red")
 print(p)
-test <- cor.test(~ mean.plasma + rho, final, method="spearman")
-p <- ggplot(final, aes(x=mean.plasma, y=rho)) + geom_point() + stat_smooth(method="lm") + theme_classic() + ggtitle(sprintf("Spearman rho vs mean.plasma (by metabolite, Spearman rho=%.4g, p=%.4g)", test$estimate, test$p.value))
+test <- cor.test(~ meanlog.plasma + rho, final, method="spearman")
+p <- ggplot(final, aes(x=meanlog.plasma, y=rho)) + geom_point() + stat_smooth(method="lm") + theme_classic() + ggtitle(sprintf("Spearman rho vs meanlog.plasma (by metabolite, Spearman rho=%.4g, p=%.4g)", test$estimate, test$p.value))
 print(p)
-test <- cor.test(~ mean.DBS + rho, final, method="spearman")
-p <- ggplot(final, aes(x=mean.DBS, y=rho)) + geom_point() + stat_smooth(method="lm") + theme_classic() + ggtitle(sprintf("Spearman rho vs mean.DBS (by metabolite, Spearman rho=%.4g, p=%.4g)", test$estimate, test$p.value))
+test <- cor.test(~ meanlog.DBS + rho, final, method="spearman")
+p <- ggplot(final, aes(x=meanlog.DBS, y=rho)) + geom_point() + stat_smooth(method="lm") + theme_classic() + ggtitle(sprintf("Spearman rho vs meanlog.DBS (by metabolite, Spearman rho=%.4g, p=%.4g)", test$estimate, test$p.value))
 print(p)
 p <- ggplot(final, aes(x=ICC)) + geom_histogram(bins=50) + theme_classic() + ggtitle(sprintf("Distribution of ICC (by metabolite, mean=%.2g, median=%.2g)", mean(final$ICC), median(final$ICC))) + geom_vline(xintercept=mean(final$ICC), color="red")
 print(p)
@@ -288,7 +346,6 @@ p <- ggplot(df, aes(x=threshold, y=pct, color=method)) + geom_point() + geom_lin
 print(p)
 # tables and distribution plots of highly reproducible metabolites
 out <- subset(final, ICC>=0.9)
-out <- merge(out, metabolon_map, by="row.names")
 write.table(out, file="output/high_ICC_metabolites.txt", row.names=F, col.names=T, sep="\t")
 for (metabolite in out$Row.names) {
 	tmp <- rbind(data.plasma[,metabolite], data.dbs[,metabolite]); rownames(tmp) <- c("plasma", "DBS")
@@ -297,15 +354,15 @@ for (metabolite in out$Row.names) {
 	print(p)
 }
 
-## plot of mean metabolite values (axes are values in DBS and plasma), colored by ICC/Spearman rho
+## plot of meanlog metabolite values (axes are values in DBS and plasma), colored by ICC/Spearman rho
 # maybe also draw ellipse for each point as SD of each metabolite?
-p <- ggplot(final, aes(x=mean.plasma, y=mean.DBS, color=ICC)) + geom_point() + theme_classic() + ggtitle(sprintf("mean metabolite values and ICC")) + scale_color_gradient(low="black", high="green") + geom_vline(xintercept=0) + geom_hline(yintercept=0) + geom_abline(slope=1)
+p <- ggplot(final, aes(x=meanlog.plasma, y=meanlog.DBS, color=ICC)) + geom_point() + theme_classic() + ggtitle(sprintf("meanlog metabolite values and ICC")) + scale_color_gradient(low="black", high="green") + geom_vline(xintercept=0) + geom_hline(yintercept=0) + geom_abline(slope=1)
 print(p)
-p <- ggplot(final, aes(x=mean.plasma, y=mean.DBS, color=ICC)) + geom_point() + geom_errorbarh(aes(xmin=mean.plasma-sd.plasma, xmax=mean.plasma+sd.plasma), height=0.4) + geom_errorbar(aes(ymin=mean.DBS-sd.DBS, ymax=mean.DBS+sd.DBS), width=0.4) + theme_classic() + ggtitle(sprintf("mean metabolite values and ICC")) + scale_color_gradient(low="black", high="green")
+p <- ggplot(final, aes(x=meanlog.plasma, y=meanlog.DBS, color=ICC)) + geom_point() + geom_errorbarh(aes(xmin=meanlog.plasma-sdlog.plasma, xmax=meanlog.plasma+sdlog.plasma), height=0.4) + geom_errorbar(aes(ymin=meanlog.DBS-sdlog.DBS, ymax=meanlog.DBS+sdlog.DBS), width=0.4) + theme_classic() + ggtitle(sprintf("meanlog metabolite values and ICC")) + scale_color_gradient(low="black", high="green")
 print(p)
-p <- ggplot(final, aes(x=mean.plasma, y=mean.DBS, color=rho)) + geom_point() + theme_classic() + ggtitle(sprintf("mean metabolite values and rho")) + scale_color_gradient(low="black", high="green") + geom_vline(xintercept=0) + geom_hline(yintercept=0) + geom_abline(slope=1)
+p <- ggplot(final, aes(x=meanlog.plasma, y=meanlog.DBS, color=rho)) + geom_point() + theme_classic() + ggtitle(sprintf("meanlog metabolite values and rho")) + scale_color_gradient(low="black", high="green") + geom_vline(xintercept=0) + geom_hline(yintercept=0) + geom_abline(slope=1)
 print(p)
-p <- ggplot(final, aes(x=mean.plasma, y=mean.DBS, color=rho)) + geom_point() + geom_errorbarh(aes(xmin=mean.plasma-sd.plasma, xmax=mean.plasma+sd.plasma), height=0.4) + geom_errorbar(aes(ymin=mean.DBS-sd.DBS, ymax=mean.DBS+sd.DBS), width=0.4) + theme_classic() + ggtitle(sprintf("mean metabolite values and rho")) + scale_color_gradient(low="black", high="green")
+p <- ggplot(final, aes(x=meanlog.plasma, y=meanlog.DBS, color=rho)) + geom_point() + geom_errorbarh(aes(xmin=meanlog.plasma-sdlog.plasma, xmax=meanlog.plasma+sdlog.plasma), height=0.4) + geom_errorbar(aes(ymin=meanlog.DBS-sdlog.DBS, ymax=meanlog.DBS+sdlog.DBS), width=0.4) + theme_classic() + ggtitle(sprintf("meanlog metabolite values and rho")) + scale_color_gradient(low="black", high="green")
 print(p)
 
 ## metabolite class distribution of highly reproducible metabolites
@@ -323,6 +380,23 @@ for (thresh in thresholds) {
 		print(p)
 	}
 }
+
+## ICC vs detection (are metabolites that are detected in many samples, more like to be highly reproducible?)
+df <- {}
+for (threshold in detection_thresholds) {
+	tmp <- subset(final, detected.DBS >= threshold & detected.plasma >= threshold)
+	df <- rbind(df, cbind(threshold, tmp[,c("BIOCHEMICAL", "ICC", "meanlog.DBS", "meanlog.plasma")]))
+}
+df$threshold <- factor(df$threshold)
+df2 <- melt(df)
+p <- ggplot(df2, aes(x=threshold, y=value, color=variable)) + geom_boxplot() + theme_classic() + ggtitle(sprintf("ICC and meanlog values by detection threshold"))
+print(p)
+p <- ggplot(subset(df2, variable=="ICC"), aes(x=threshold, y=value)) + geom_boxplot() + theme_classic() + ggtitle(sprintf("ICC by detection threshold"))
+print(p)
+p <- ggplot(subset(df2, variable!="ICC"), aes(x=threshold, y=value, color=variable)) + geom_boxplot() + theme_classic() + ggtitle(sprintf("meanlog values by detection threshold"))
+print(p)
+p <- ggplot(df2, aes(x=threshold, y=value, color=variable)) + geom_boxplot() + facet_wrap(~variable, ncol=1, scales="free_y") + theme_classic() + ggtitle(sprintf("ICC and meanlog values by detection threshold"))
+print(p)
 
 ## metabolite class and ICC distribution of random forests selected features
 featurelist <- {}
@@ -365,95 +439,10 @@ write.table(out, file="output/RF_features_in_multiple_models.txt", row.names=F, 
 p <- ggplot(out, aes(x=Flag, y=ICC)) + geom_boxplot() + theme_classic() + ggtitle(sprintf("ICC by RF consistency (Wilcoxon p=%.4g)", test$p.value))
 print(p)
 
-## ICC and Spearman correlation in paired maternal plasma/DBS samples (stratified by Country)
-subtype <- "maternal"
-mapping.sel <- mapping; rownames(mapping.sel) <- mapping$patid
-sel.metabolites <- rownames(subset(merged, FLAG.maternal_plasma & FLAG.maternal_DBS))
-data <- matrix()
-data.plasma <- df.metabolon[["Plasma"]][[mlevel]][as.character(mapping$patid), sel.metabolites]
-data.dbs <- df.metabolon[["DBS"]][[mlevel]][as.character(mapping$patid), sel.metabolites]
-data <- abind(data.plasma, data.dbs, along=0); dimnames(data)[[1]] <- c("Plasma", "DBS")
-final <- {}
-for (country in levels(mapping.sel$Country)) {
-	mapping.country <- subset(mapping.sel, Country==country)
-	data.country <- data[,rownames(mapping.country),]
-	tmp <- t(apply(data.country, 3, function(x) {
-		test <- try(cor.test(x[1,], x[2,], method="spearman"), silent=T)
-		test.icc <- try(ICC(t(x)), silent=T)
-		if (class(test) != "try-error" && class(test.icc) != "try-error") {
-			unlist(c(country, mean(x[1,]), mean(x[2,]), sd(x[1,]), sd(x[2,]), mean(abs(x[1,]-x[2,])), test.icc$results["Single_raters_absolute", c("ICC", "p", "lower bound", "upper bound")], test$estimate, test$p.value))
-		} else {
-			unlist(c(country, mean(x[1,]), mean(x[2,]), sd(x[1,]), sd(x[2,]), mean(abs(x[1,]-x[2,])), NA, NA, NA, NA, NA, NA))
-		}
-	}))
-	tmp <- as.data.frame(tmp)
-	tmp$metabolite <- rownames(tmp)
-	final <- rbind(final, tmp)
-}
-final <- as.data.frame(final); colnames(final) <- c("country", "mean.plasma", "mean.DBS", "sd.plasma", "sd.DBS", "mean_difference", "ICC", "p", "lower_bound", "upper_bound", "rho", "spearman_p", "metabolite")
-final$p <- as.numeric(as.character(final$p)); final$spearman_p <- as.numeric(as.character(final$spearman_p)); final$mean.plasma <- as.numeric(as.character(final$mean.plasma)); final$mean.DBS <- as.numeric(as.character(final$mean.DBS)); final$ICC <- as.numeric(as.character(final$ICC)); final$rho <- as.numeric(as.character(final$rho))
-final$padj <- p.adjust(final$p, method="fdr")
-final$spearman_padj <- p.adjust(final$spearman_p, method="fdr")
-final <- final[order(final$p), ]
-write.table(final, file="output/ICC_by_Country.metabolite.txt", quote=F, sep="\t", row.names=T, col.names=T)
-final <- subset(final, mean.plasma > -5 & mean.DBS > -5) # remove a few really low abundance outliers
-p <- ggplot(final, aes(x=mean.plasma, y=ICC, color=country)) + geom_point() + stat_smooth(method="lm") + theme_classic() + ggtitle(sprintf("ICC vs mean.plasma (by metabolite, stratified by Country)")) + scale_color_brewer(palette="Set1")
-print(p)
-p <- ggplot(final, aes(x=mean.DBS, y=ICC, color=country)) + geom_point() + stat_smooth(method="lm") + theme_classic() + ggtitle(sprintf("ICC vs mean.DBS (by metabolite, stratified by Country)")) + scale_color_brewer(palette="Set1")
-print(p)
-p <- ggplot(final, aes(x=ICC, color=country)) + geom_density() + theme_classic() + ggtitle(sprintf("Distribution of ICC (by metabolite, stratified by Country)")) + scale_color_brewer(palette="Set1")
-print(p)
-summ <- aggregate(ICC~country, final, summary)
-p <- qplot(1:10, 1:10, geom = "blank") + theme_bw() + ggtitle(sprintf("ICC by metabolite+Country summary statistics")) + theme(line = element_blank()) + annotation_custom(grob = tableGrob(t(summ)), xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf)
-print(p)
-
-## ICC and Spearman correlation in paired maternal plasma/DBS samples (stratified by Group)
-subtype <- "maternal"
-mapping.sel <- mapping; rownames(mapping.sel) <- mapping$patid
-sel.metabolites <- rownames(subset(merged, FLAG.maternal_plasma & FLAG.maternal_DBS))
-data <- matrix()
-data.plasma <- df.metabolon[["Plasma"]][[mlevel]][as.character(mapping$patid), sel.metabolites]
-data.dbs <- df.metabolon[["DBS"]][[mlevel]][as.character(mapping$patid), sel.metabolites]
-data <- abind(data.plasma, data.dbs, along=0); dimnames(data)[[1]] <- c("Plasma", "DBS")
-final <- {}
-for (gr in setdiff(levels(mapping.sel$Group), c("Case.other", "Control.other"))) {
-	mapping.gr <- subset(mapping.sel, Group==gr)
-	data.gr <- data[,rownames(mapping.gr),]
-	tmp <- t(apply(data.gr, 3, function(x) {
-		test <- try(cor.test(x[1,], x[2,], method="spearman"), silent=T)
-		test.icc <- try(ICC(t(x)), silent=T)
-		if (class(test) != "try-error" && class(test.icc) != "try-error") {
-			unlist(c(gr, mean(x[1,]), mean(x[2,]), sd(x[1,]), sd(x[2,]), mean(abs(x[1,]-x[2,])), test.icc$results["Single_raters_absolute", c("ICC", "p", "lower bound", "upper bound")], test$estimate, test$p.value))
-		} else {
-			unlist(c(gr, mean(x[1,]), mean(x[2,]), sd(x[1,]), sd(x[2,]), mean(abs(x[1,]-x[2,])), NA, NA, NA, NA, NA, NA))
-		}
-	}))
-	tmp <- as.data.frame(tmp)
-	tmp$metabolite <- rownames(tmp)
-	final <- rbind(final, tmp)
-}
-final <- as.data.frame(final); colnames(final) <- c("Group", "mean.plasma", "mean.DBS", "sd.plasma", "sd.DBS", "mean_difference", "ICC", "p", "lower_bound", "upper_bound", "rho", "spearman_p", "metabolite")
-final$p <- as.numeric(as.character(final$p)); final$spearman_p <- as.numeric(as.character(final$spearman_p)); final$mean.plasma <- as.numeric(as.character(final$mean.plasma)); final$mean.DBS <- as.numeric(as.character(final$mean.DBS)); final$ICC <- as.numeric(as.character(final$ICC)); final$rho <- as.numeric(as.character(final$rho))
-final$padj <- p.adjust(final$p, method="fdr")
-final$spearman_padj <- p.adjust(final$spearman_p, method="fdr")
-final <- final[order(final$p), ]
-write.table(final, file="output/ICC_by_Group.metabolite.txt", quote=F, sep="\t", row.names=T, col.names=T)
-final <- subset(final, mean.plasma > -5 & mean.DBS > -5) # remove a few really low abundance outliers
-p <- ggplot(final, aes(x=mean.plasma, y=ICC, color=Group)) + geom_point() + stat_smooth(method="lm") + theme_classic() + ggtitle(sprintf("ICC vs mean.plasma (by metabolite, stratified by Group)")) + scale_color_brewer(palette="Set1")
-print(p)
-p <- ggplot(final, aes(x=mean.DBS, y=ICC, color=Group)) + geom_point() + stat_smooth(method="lm") + theme_classic() + ggtitle(sprintf("ICC vs mean.DBS (by metabolite, stratified by Group)")) + scale_color_brewer(palette="Set1")
-print(p)
-p <- ggplot(final, aes(x=ICC, color=Group)) + geom_density() + theme_classic() + ggtitle(sprintf("Distribution of ICC (by metabolite, stratified by Group)")) + scale_color_brewer(palette="Set1")
-print(p)
-p <- ggplot(final, aes(x=Group, y=ICC)) + geom_boxplot() + theme_classic() + ggtitle(sprintf("Distribution of ICC (by metabolite, stratified by Group)"))
-print(p)
-summ <- aggregate(ICC~Group, final, summary)
-p <- qplot(1:10, 1:10, geom = "blank") + theme_bw() + ggtitle(sprintf("ICC by metabolite+Group summary statistics")) + theme(line = element_blank()) + annotation_custom(grob = tableGrob(t(summ)), xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf)
-print(p)
 
 ## ICC by subject
 final <- apply(data, 2, function(x) {
-	unlist(c(mean(x[1,]), mean(x[2,]), mean(abs(x[1,]-x[2,])), ICC(t(x))$results["Single_raters_absolute", c("ICC", "p", "lower bound", "upper bound")]))
+	unlist(c(mean(x[1,]), mean(x[2,]), mean(abs(x[1,]-x[2,])), ICC(t(x))$results["Single_random_raters", c("ICC", "p", "lower bound", "upper bound")]))
 #	icc(t(x))$value
 }); final <- as.data.frame(t(final)); colnames(final) <- c("mean.plasma", "mean.DBS", "mean_difference", "ICC", "p", "lower_bound", "upper_bound")
 final$padj <- p.adjust(final$p, method="fdr")
@@ -493,13 +482,35 @@ for (mvar in c("Group", "Delivery")) {
 	print(p)
 }
 ## PCA
-pca <- prcomp(data2, center=F, scale=F)
+pca <- prcomp(data2, center=T, scale=T)
 eigs <- pca$sdev^2
 pvar <- 100*(eigs / sum(eigs))
 df.pca <- df # from tSNE above
-df.pca$PC1 <- pca$x[,1]; df.pca$PC2 <- pca$x[,2]
+df.pca$PC1 <- pca$x[,1]; df.pca$PC2 <- pca$x[,2]; df.pca$PC3 <- pca$x[,3]
 p <- ggplot(df.pca, aes_string(x="PC1", y="PC2", colour="SampleType")) + geom_point() + theme_classic() + ggtitle(sprintf("PCoA by SampleType (Euclidean distance)")) + xlab(sprintf("PC1 [%.1f%%]", pvar[1])) + ylab(sprintf("PC2 [%.1f%%]", pvar[2])) + scale_color_brewer(palette="Set1") + stat_ellipse(type="t")
 print(p)
+p <- ggplot(df.pca, aes_string(x="PC1", y="PC3", colour="SampleType")) + geom_point() + theme_classic() + ggtitle(sprintf("PCoA by SampleType (Euclidean distance)")) + xlab(sprintf("PC1 [%.1f%%]", pvar[1])) + ylab(sprintf("PC3 [%.1f%%]", pvar[3])) + scale_color_brewer(palette="Set1") + stat_ellipse(type="t")
+print(p)
+p <- ggplot(df.pca, aes_string(x="PC2", y="PC3", colour="SampleType")) + geom_point() + theme_classic() + ggtitle(sprintf("PCoA by SampleType (Euclidean distance)")) + xlab(sprintf("PC2 [%.1f%%]", pvar[2])) + ylab(sprintf("PC3 [%.1f%%]", pvar[3])) + scale_color_brewer(palette="Set1") + stat_ellipse(type="t")
+print(p)
+df.lines <- ddply(df.pca, .(SubjectID), function(x) {
+	c(x[1, "PC1"], x[1, "PC2"], x[2, "PC1"], x[2, "PC2"])
+}); colnames(df.lines) <- c("SubjectID", "PC1a", "PC2a", "PC1b", "PC2b")
+p <- ggplot(df.pca, aes_string(x="PC1", y="PC2", colour="SampleType")) + geom_point() + theme_classic() + ggtitle(sprintf("PCoA by SampleType (Euclidean distance)")) + xlab(sprintf("PC1 [%.1f%%]", pvar[1])) + ylab(sprintf("PC2 [%.1f%%]", pvar[2])) + scale_color_brewer(palette="Set1") + stat_ellipse(type="t") + geom_segment(data=df.lines, aes(x=PC1a, xend=PC1b, y=PC2a, yend=PC2b), inherit.aes=F, size=0.2)
+print(p)
+# inspect loadings
+for (pc in c(1,2,3)) {
+	tmp <- sort(pca$rotation[,pc])
+	df.loading <- data.frame(loading=c(tmp[1:10], tmp[(length(tmp)-9):length(tmp)])); df.loading$metabolite <- rownames(df.loading)
+	df.loading$metabolite <- factor(df.loading$metabolite, levels=df.loading$metabolite)
+	df.loading$detected.DBS <- merged[as.character(df.loading$metabolite), "detected.DBS"]
+	df.loading$detected.plasma <- merged[as.character(df.loading$metabolite), "detected.plasma"]
+	df.loading$metabolite_str <- sprintf("%s (detected %d/%d DBS/plasma)", df.loading$metabolite, df.loading$detected.DBS, df.loading$detected.plasma)
+	p <- ggplot(df.loading, aes(x=metabolite, y=loading)) + geom_bar(stat="identity", fill="grey") + theme_classic() + ggtitle(sprintf("top 10 loadings for PC%s", pc)) + coord_flip() + geom_text(aes(x=metabolite, y=0, label=metabolite_str), size=3, hjust=0) + theme(axis.text.y=element_blank())
+	print(p)
+}
+fviz_pca_biplot(pca, col.var="red", label="var", arrowsize=0.6, labelsize=2, addEllipses=TRUE, ellipse.type="confidence")
+
 
 ## PERMANOVA
 res <- adonis2(data2 ~ SampleType + Group + SubjectID, data=df, permutations=999, method='euclidean')
@@ -518,30 +529,6 @@ test <- wilcox.test(dist ~ Group, pair_df)
 p <- ggplot(pair_df, aes(x=Group, y=dist)) + geom_boxplot() + theme_classic() + ggtitle(sprintf("%s distance comparison (Wilcoxon p=%.4g)", distance_metric, test$p.value))
 print(p)
 
-## differential abundance
-# t-test/Wilcoxon
-subtype <- "maternal"
-mapping.sel <- mapping; rownames(mapping.sel) <- mapping$patid
-sel.metabolites <- rownames(subset(merged, FLAG.maternal_plasma & FLAG.maternal_DBS))
-data <- matrix()
-data.plasma <- df.metabolon[["Plasma"]][[mlevel]][as.character(mapping$patid), sel.metabolites]
-data.dbs <- df.metabolon[["DBS"]][[mlevel]][as.character(mapping$patid), sel.metabolites]
-data <- abind(data.plasma, data.dbs, along=0); dimnames(data)[[1]] <- c("Plasma", "DBS")
-final <- apply(data, 3, function(x) {
-	test <- t.test(x[1,], x[2,])
-	test2 <- wilcox.test(x[1,], x[2,])
-	unlist(c(mean(x[1,]), mean(x[2,]), sd(x[1,]), sd(x[2,]), mean(abs(x[1,]-x[2,])), test$statistic, test$p.value, test2$statistic, test2$p.value))
-}); final <- as.data.frame(t(final)); colnames(final) <- c("mean.plasma", "mean.DBS", "sd.plasma", "sd.DBS", "mean_difference", "t", "p", "W", "p.wilcox")
-final$padj <- p.adjust(final$p, method="fdr")
-final$padj.wilcox <- p.adjust(final$p.wilcox, method="fdr")
-final <- final[order(final$p), ]
-write.table(final, file="output/DA.metabolite.txt", quote=F, sep="\t", row.names=T, col.names=T)
-metlist <- rownames(subset(final, padj<siglevel))
-p <- plot_metabolite_breakdown(metlist, metabolon_map) + ggtitle(sprintf("DA metabolites (t-test padj<%.2g)", siglevel))
-print(p)
-metlist <- rownames(subset(final, padj.wilcox<siglevel))
-p <- plot_metabolite_breakdown(metlist, metabolon_map) + ggtitle(sprintf("DA metabolites (Wilcoxon padj<%.2g)", siglevel))
-print(p)
 
 
 dev.off()
